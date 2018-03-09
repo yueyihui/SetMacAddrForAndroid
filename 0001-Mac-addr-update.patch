@@ -1,0 +1,238 @@
+From 3de45fbeed2fb0b494ed0eb1dd9b437519e2fbef Mon Sep 17 00:00:00 2001
+From: "Yue, Liang" <liang.yue@cienet.com.cn>
+Date: Fri, 9 Mar 2018 16:47:38 +0800
+Subject: [PATCH] Mac addr update
+
+---
+ .../java/android/os/INetworkManagementService.aidl |  5 +++
+ .../android/server/NetworkManagementService.java   | 10 +++++
+ .../server/ethernet/EthernetNetworkFactory.java    | 27 +++++++++----
+ .../server/ethernet/EthernetServiceImpl.java       | 31 +++++++++++++++
+ system/netd/server/CommandListener.cpp             | 46 ++++++++++++++++++++++
+ system/netd/server/CommandListener.h               |  1 +
+ 6 files changed, 113 insertions(+), 7 deletions(-)
+
+diff --git a/frameworks/base/core/java/android/os/INetworkManagementService.aidl b/frameworks/base/core/java/android/os/INetworkManagementService.aidl
+index f177249..44bb74a 100644
+--- a/frameworks/base/core/java/android/os/INetworkManagementService.aidl
++++ b/frameworks/base/core/java/android/os/INetworkManagementService.aidl
+@@ -67,6 +67,11 @@ interface INetworkManagementService
+     void setDefaultGateway(String iface, String gw);
+ 
+     /**
++    * Set mac address
++    */
++    void setMacAddress(String iface, String mac);
++
++    /**
+      * Clear all IP addresses on the specified interface
+      */
+     void clearInterfaceAddresses(String iface);
+diff --git a/frameworks/base/services/core/java/com/android/server/NetworkManagementService.java b/frameworks/base/services/core/java/com/android/server/NetworkManagementService.java
+index b4384a3..57979e7 100644
+--- a/frameworks/base/services/core/java/com/android/server/NetworkManagementService.java
++++ b/frameworks/base/services/core/java/com/android/server/NetworkManagementService.java
+@@ -1008,6 +1008,16 @@ public class NetworkManagementService extends INetworkManagementService.Stub
+     }
+ 
+     @Override
++    public void setMacAddress(String iface, String mac) {
++        final Command cmd = new Command("interface", "setmac", iface, mac);
++        try {
++            mConnector.execute(cmd);
++        } catch (NativeDaemonConnectorException e) {
++            throw e.rethrowAsParcelableException();
++        }
++    }
++
++    @Override
+     public void setInterfaceDown(String iface) {
+         mContext.enforceCallingOrSelfPermission(CONNECTIVITY_INTERNAL, TAG);
+         final InterfaceConfiguration ifcg = getInterfaceConfig(iface);
+diff --git a/frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetNetworkFactory.java b/frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetNetworkFactory.java
+index 76264ae..990ea14 100644
+--- a/frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetNetworkFactory.java
++++ b/frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetNetworkFactory.java
+@@ -116,15 +116,17 @@ class EthernetNetworkFactory {
+     /*add for eth 20160416  begin*/                                    
+  private DhcpResults mDhcpResults;
+  private Handler mHandler;                                              
+-                                                                        
+- private static final int CMD_REQUEST_NETWORK_AGAIN = 0;                
+- private static final int CMD_REQUEST_NETWORK_STOP  = 1;                
+- static final int OBTAINING_IP_ADDRESS_GUARD_TIMER_MSEC = 10000;        
+- private int obtainingIpWatchdogCount = 0;    
++
++ private static final int CMD_REQUEST_NETWORK_AGAIN = 0;
++ private static final int CMD_REQUEST_NETWORK_STOP  = 1;
++ static final int OBTAINING_IP_ADDRESS_GUARD_TIMER_MSEC = 10000;
++ private int obtainingIpWatchdogCount = 0;
+  private int againscore=NETWORK_SCORE;
+- private final BroadcastReceiver mEthStateReceiver;  
++ private final BroadcastReceiver mEthStateReceiver;
+  private final IntentFilter mFilter; 
+-/*add for eth  20160416  end*/                                      
++/*add for eth  20160416  end*/
++
++    private String mNewMacAddr;
+ 
+     EthernetNetworkFactory(String iface, RemoteCallbackList<IEthernetServiceListener> listeners) {
+         mIface = iface;
+@@ -507,6 +509,10 @@ class EthernetNetworkFactory {
+ 	    }
+     }
+ 
++    public void setMacAddress(String mac) {
++        mNewMacAddr = mac;
++    }
++
+     /**
+      * Begin monitoring connectivity
+      */
+@@ -514,6 +520,13 @@ class EthernetNetworkFactory {
+         // The services we use.
+         IBinder b = ServiceManager.getService(Context.NETWORKMANAGEMENT_SERVICE);
+         mNMService = INetworkManagementService.Stub.asInterface(b);
++        if (mNewMacAddr != null && !mNewMacAddr.isEmpty()) {//set mac addr
++            try {
++                mNMService.setMacAddress(mIface, mNewMacAddr);
++            } catch (RemoteException e) {
++                Slog.e(TAG, "Could not setMacAddress " + e);
++            }
++        }
+ 		//modify for eth 20160416  from  (EthernetManager) context.getSystemService(Context.ETHERNET_SERVICE); to EthernetManager.getInstance();
+         mEthernetManager = EthernetManager.getInstance();
+ 
+diff --git a/frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetServiceImpl.java b/frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetServiceImpl.java
+index 3333f58..2636b31 100755
+--- a/frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetServiceImpl.java
++++ b/frameworks/opt/net/ethernet/java/com/android/server/ethernet/EthernetServiceImpl.java
+@@ -103,11 +103,42 @@ public class EthernetServiceImpl extends IEthernetManager.Stub {
+             Log.i(TAG, "Read stored IP configuration: " + entry.getValue());
+         }
+ 
++
+         mTracker = new ArrayMap<>();
+         mTracker.put(ETH0,new EthernetNetworkFactory(ETH0, mListeners));
++        String mac;
++        if ( (mac = getMacFromFile("/data/security/MacAddr")) != null) {
++            mTracker.get(ETH0).setMacAddress(mac);
++        }
++
+         mTracker.put(ETH1,new EthernetNetworkFactory(ETH1, mListeners));
+     }
+ 
++    /**
++    *  /data/security/MacAddr format as below, it has two line.
++    *
++    *  00:1F:55:87:52:01
++    *  00:1F:55:87:52:02
++    *
++    *  here, we used the first one to be mac address for eth0.
++    */
++    private String getMacFromFile(String path) {
++        try {
++            FileInputStream fis = new FileInputStream(path);
++            // use BufferedReader to build inputStream
++            BufferedReader br = new BufferedReader(new InputStreamReader(fis));
++            String line;
++            // read file
++            while ((line = br.readLine()) != null) {
++                br.close();
++                return line;
++            }
++        } catch (IOException e) {
++            e.printStackTrace();
++        }
++        return null;
++    }
++
+     private void enforceAccessPermission() {
+         mContext.enforceCallingOrSelfPermission(
+                 android.Manifest.permission.ACCESS_NETWORK_STATE,
+diff --git a/system/netd/server/CommandListener.cpp b/system/netd/server/CommandListener.cpp
+index 2c746ac..0e1b84a 100644
+--- a/system/netd/server/CommandListener.cpp
++++ b/system/netd/server/CommandListener.cpp
+@@ -26,6 +26,7 @@
+ #include <string.h>
+ #include <linux/if.h>
+ #include <resolv_netid.h>
++#include <net/if_arp.h>
+ 
+ #define __STDC_FORMAT_MACROS 1
+ #include <inttypes.h>
+@@ -499,6 +500,15 @@ int CommandListener::InterfaceCmd::runCommand(SocketClient *cli,
+                 cli->sendMsg(ResponseCode::OperationFailed, "create gw failed", true);
+             }
+             return 0;
++        } else if (!strcmp(argv[1], "setmac")) {
++            ALOGD("setmac %s %s",argv[2], argv[3]);
++            if (this->linux_set_ifhwaddr(argv[2], argv[3]) == 0) {
++                cli->sendMsg(ResponseCode::CommandOkay, "setmac succeeded", false);
++                ALOGD("setmac succeeded");
++            } else {
++                cli->sendMsg(ResponseCode::OperationFailed, "setmac failed", true);
++                ALOGE("setmac failed");
++            }
+         } else {
+             cli->sendMsg(ResponseCode::CommandSyntaxError, "Unknown interface cmd", false);
+             return 0;
+@@ -507,6 +517,42 @@ int CommandListener::InterfaceCmd::runCommand(SocketClient *cli,
+     return 0;
+ }
+ 
++int CommandListener::InterfaceCmd::linux_set_ifhwaddr(const char *ifname, const char *addr)
++{
++    int fd, rtn;
++    struct ifreq ifr;
++    char *ptr, *p;
++    const char *hw_addr;
++    if( !ifname || !addr ) {
++        return -1;
++    }
++    fd = socket(AF_INET, SOCK_DGRAM, 0);
++    if ( fd < 0 ) {
++        ALOGE("linux_set_ifhwaddr socket AF_INET error");
++        return -1;
++    }
++    hw_addr = addr;
++    ptr = p = (char *)ifr.ifr_hwaddr.sa_data;
++/**string convert to hex without : that is for sa_data, this is copied from ifconfig**/
++    while (*hw_addr && (p-ptr) < 6) {
++        int val, len = 0;
++
++        if (*hw_addr == ':') hw_addr++;
++        sscanf(hw_addr, "%2x%n", &val, &len);
++        if (!len || len > 2) break; // 1 nibble can be set e.g. C2:79:38:95:D:A 
++        hw_addr += len;
++        *p++ = val;
++    }
++/****/
++    ifr.ifr_addr.sa_family = ARPHRD_ETHER;
++    strncpy(ifr.ifr_name, ifname, 16);
++    if ( (rtn = ioctl(fd, SIOCSIFHWADDR, &ifr) ) != 0 ) {
++        ALOGE("linux_set_ifhwaddr SIOCSIFHWADDR error");
++    }
++    close(fd);
++    return rtn;
++}
++
+ 
+ CommandListener::ListTtysCmd::ListTtysCmd() :
+                  NetdCommand("list_ttys") {
+diff --git a/system/netd/server/CommandListener.h b/system/netd/server/CommandListener.h
+index 72f4da1..01c38d9 100644
+--- a/system/netd/server/CommandListener.h
++++ b/system/netd/server/CommandListener.h
+@@ -66,6 +66,7 @@ private:
+         InterfaceCmd();
+         virtual ~InterfaceCmd() {}
+         int runCommand(SocketClient *c, int argc, char ** argv);
++        int linux_set_ifhwaddr(const char *ifname, const char *addr);
+     };
+ 
+     class IpFwdCmd : public NetdCommand {
+-- 
+1.9.1
+
